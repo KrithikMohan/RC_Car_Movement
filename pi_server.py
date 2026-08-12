@@ -144,8 +144,9 @@ def control():
     last_cmd_time = time.time()
     current_cmd = cmd
 
-    if cmd in COMMAND_MAP[current_speed_mode]:
-        send_serial(COMMAND_MAP[current_speed_mode][cmd])
+    #if cmd in COMMAND_MAP[current_speed_mode]:
+    if cmd in COMMAND_MAP["low"]:
+        send_serial(COMMAND_MAP["low"][cmd])
     return jsonify({'status': 'ok', 'command': cmd})
 
 

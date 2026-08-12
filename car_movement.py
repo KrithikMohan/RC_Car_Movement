@@ -8,7 +8,7 @@ import numpy as np
 import pygame
 import requests
 
-PI_IP = '10.255.254.35'
+PI_IP = ('10.255.254.35')
 BASE_URL = f'http://{PI_IP}:5000'
 DOWNLOAD_DIR = os.path.expanduser('~/Downloads')
 
