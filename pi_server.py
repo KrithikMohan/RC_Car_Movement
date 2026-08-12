@@ -3,37 +3,30 @@ import time
 import math
 import shutil
 import threading
-import json
-import serial
 import cv2
 from flask import Flask, Response, request, jsonify, send_from_directory
+from ugv_command import send_command
 
 app = Flask(__name__)
 
-# Serial interface configuration for UGV02 chassis
-SERIAL_PORT = '/dev/ttyUSB0'  # Adjust to /dev/ttyAMA0 if using GPIO serial
-BAUD_RATE = 115200
-
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
-except Exception as e:
-    print(f"[SERIAL WARNING] Could not open serial port {SERIAL_PORT}: {e}")
-    ser = None
+slow_speed=0.15
+turn_speed=0.10
+high_speed=0.30
 
 # Motor Command Mapping
 COMMAND_MAP = {
     'low': {
-        'f': '{"T":1,"L":150,"R":150}',
-        'b': '{"T":1,"L":-150,"R":-150}',
-        'l': '{"T":1,"L":-100,"R":100}',
-        'r': '{"T":1,"L":100,"R":-100}',
+        'f': f'{{"T":1,"L":{slow_speed},"R":{slow_speed}}}',
+        'b': f'{{"T":1,"L":{-slow_speed},"R":{-slow_speed}}}',
+        'l': f'{{"T":1,"L":{-turn_speed},"R":{turn_speed}}}',
+        'r': f'{{"T":1,"L":{turn_speed},"R":{-turn_speed}}}',
         's': '{"T":1,"L":0,"R":0}'
     },
     'high': {
-        'f': '{"T":1,"L":300,"R":300}',
-        'b': '{"T":1,"L":-300,"R":-300}',
-        'l': '{"T":1,"L":-200,"R":200}',
-        'r': '{"T":1,"L":200,"R":-200}',
+        'f': f'{{"T":1,"L":{high_speed},"R":{high_speed}}}',
+        'b': f'{{"T":1,"L":{-high_speed},"R":{-high_speed}}}',
+        'l': f'{{"T":1,"L":{-turn_speed},"R":{turn_speed}}}',
+        'r': f'{{"T":1,"L":{turn_speed},"R":{-turn_speed}}}',
         's': '{"T":1,"L":0,"R":0}'
     }
 }
@@ -64,12 +57,16 @@ video_writer = None
 camera = cv2.VideoCapture(0)
 
 
-def send_serial(cmd_str):
-    if ser and ser.is_open:
-        try:
-            ser.write((cmd_str + '\n').encode('utf-8'))
-        except Exception as e:
-            print(f"[SERIAL ERROR] {e}")
+def send_ugv_command(cmd_str):
+    """Send a command to UGV02 via ugv_command module."""
+    try:
+        response = send_command(cmd_str)
+        if response:
+            print(f"[UGV02 RESPONSE] {response}")
+        return response
+    except Exception as e:
+        print(f"[UGV02 ERROR] {e}")
+        return None
 
 
 def watchdog_thread():
@@ -78,7 +75,7 @@ def watchdog_thread():
     while True:
         if time.time() - last_cmd_time > 0.5 and current_cmd != 's':
             current_cmd = 's'
-            send_serial(COMMAND_MAP[current_speed_mode]['s'])
+            send_ugv_command(COMMAND_MAP[current_speed_mode]['s'])
         time.sleep(0.1)
 
 
@@ -144,9 +141,8 @@ def control():
     last_cmd_time = time.time()
     current_cmd = cmd
 
-    #if cmd in COMMAND_MAP[current_speed_mode]:
-    if cmd in COMMAND_MAP["low"]:
-        send_serial(COMMAND_MAP["low"][cmd])
+    if cmd in COMMAND_MAP[current_speed_mode]:
+        send_ugv_command(COMMAND_MAP[current_speed_mode][cmd])
     return jsonify({'status': 'ok', 'command': cmd})
 
 
@@ -207,7 +203,7 @@ def reset_origin():
 
 @app.route('/shutdown', methods=['POST'])
 def shutdown():
-    send_serial(COMMAND_MAP[current_speed_mode]['s'])
+    send_ugv_command(COMMAND_MAP[current_speed_mode]['s'])
 
     def _shutdown():
         time.sleep(1)
