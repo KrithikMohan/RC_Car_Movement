@@ -8,7 +8,7 @@ import numpy as np
 import pygame
 import requests
 
-PI_IP = ('10.255.254.35')
+PI_IP = '10.42.0.1'  # Update to active Raspberry Pi IP
 BASE_URL = f'http://{PI_IP}:5000'
 DOWNLOAD_DIR = os.path.expanduser('~/Downloads')
 
@@ -28,14 +28,14 @@ telemetry = {
 current_cmd = 's'
 last_send_time = 0
 last_downloaded_file = ''
-drive_mode = 'manual'  # Options: 'manual', 'auto_indoor'
+transfer_status = 'IDLE'  # 'IDLE', 'DOWNLOADING', 'SUCCESS', 'FAILED'
+transfer_progress_mb = 0.0
 
-# Autonomous State Machine Variables
-auto_state = 'FORWARD'  # 'FORWARD', 'RECOVER_BACK', 'RECOVER_TURN', 'FORWARD_CLEAR'
+drive_mode = 'manual'
+auto_state = 'FORWARD'
 recovery_timer = 0
 turn_dir = 'l'
 
-# Stuck / Stall Detection Variables
 last_stuck_check_time = time.time()
 last_stuck_x = 0.0
 last_stuck_y = 0.0
@@ -60,19 +60,36 @@ def send_cmd(cmd):
     send_post('control', {'command': cmd})
 
 
+# NON-BLOCKING STREAMING VIDEO DOWNLOAD
 def download_video_async(filename):
+  global transfer_status, transfer_progress_mb
+
+  if transfer_status == 'DOWNLOADING':
+    print('[TRANSFER] Download already in progress.')
+    return
+
   def _worker():
-    print(f'[TRANSFER] Downloading {filename} to {DOWNLOAD_DIR}...')
+    global transfer_status, transfer_progress_mb
+    transfer_status = 'DOWNLOADING'
+    transfer_progress_mb = 0.0
+    print(f'[TRANSFER] Starting stream download: {filename}...')
+
     try:
       url = f'{BASE_URL}/download/{filename}'
-      res = requests.get(url, stream=True, timeout=120)
-      if res.status_code == 200:
-        save_path = os.path.join(DOWNLOAD_DIR, filename)
+      save_path = os.path.join(DOWNLOAD_DIR, filename)
+
+      with requests.get(url, stream=True, timeout=120) as res:
+        res.raise_for_status()
         with open(save_path, 'wb') as f:
-          for chunk in res.iter_content(chunk_size=8192):
-            f.write(chunk)
-        print(f'[TRANSFER SUCCESS] Saved: {save_path}')
+          for chunk in res.iter_content(chunk_size=16384):
+            if chunk:
+              f.write(chunk)
+              transfer_progress_mb += len(chunk) / (1024 * 1024)
+
+      transfer_status = 'SUCCESS'
+      print(f'[TRANSFER SUCCESS] {filename} ({transfer_progress_mb:.1f} MB) -> {save_path}')
     except Exception as e:
+      transfer_status = 'FAILED'
       print(f'[TRANSFER FAILED] {e}')
 
   threading.Thread(target=_worker, daemon=True).start()
@@ -86,6 +103,7 @@ def poll_telemetry_loop():
       if res.status_code == 200:
         telemetry = res.json()
 
+        # Auto-stop and trigger download if storage runs low
         if telemetry['is_recording'] and telemetry['free_storage_gb'] < 1.0:
           rec_file = telemetry['rec_file']
           send_post('recording', {'action': 'stop'})
@@ -101,38 +119,31 @@ threading.Thread(target=poll_telemetry_loop, daemon=True).start()
 
 
 def process_indoor_auto(frame, telemetry_data):
-  """Single-camera indoor navigation using Adaptive Thresholding and Contour Area Filtering."""
   global auto_state, recovery_timer, turn_dir
   global last_stuck_check_time, last_stuck_x, last_stuck_y
 
   now = time.time()
 
-  # 1. RECOVERY STATE MACHINE
   if auto_state == 'RECOVER_BACK':
     if now - recovery_timer < 1.0:
-      return False, False, True, False  # Reverse (S key / 'f' command)
+      return False, False, True, False
     else:
       auto_state = 'RECOVER_TURN'
       recovery_timer = now
 
   if auto_state == 'RECOVER_TURN':
     if now - recovery_timer < 0.7:
-      if turn_dir == 'l':
-        return False, True, False, False  # Pivot Left (A key)
-      else:
-        return False, False, False, True  # Pivot Right (D key)
+      return (False, True, False, False) if turn_dir == 'l' else (False, False, False, True)
     else:
       auto_state = 'FORWARD_CLEAR'
       recovery_timer = now
 
   if auto_state == 'FORWARD_CLEAR':
-    # Commit to a 0.6s forward burst to exit the turned corner before re-enabling detection
     if now - recovery_timer < 0.6:
-      return True, False, False, False  # Drive Forward (W key / 'b' command)
+      return True, False, False, False
     else:
       auto_state = 'FORWARD'
 
-  # 2. STUCK / STALL ODOMETRY CHECK
   if auto_state == 'FORWARD':
     if now - last_stuck_check_time > 1.5:
       dx = telemetry_data['pos_x'] - last_stuck_x
@@ -144,27 +155,21 @@ def process_indoor_auto(frame, telemetry_data):
       last_stuck_y = telemetry_data['pos_y']
 
       if dist_moved < 0.05 and current_cmd == 'b':
-        print('[STUCK DETECTED] Motor active but no movement. Escaping...')
         auto_state = 'RECOVER_BACK'
         recovery_timer = now
         turn_dir = 'l' if random.random() > 0.5 else 'r'
         return False, False, True, False
 
-  # 3. SINGLE-FRAME INDOOR VISION PIPELINE
   small = cv2.resize(frame, (320, 240))
   gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
   blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-  # Adaptive thresholding isolates wall boundaries under soft indoor illumination
   thresh = cv2.adaptiveThreshold(
       blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
   )
 
-  # Morphological closing connects surrounding structural edges
   kernel = np.ones((5, 5), np.uint8)
   closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-  # Focus on lower ground region (Y: 130 to 235)
   roi = closed[130:235, :]
 
   left_roi = roi[:, 0:106]
@@ -177,7 +182,6 @@ def process_indoor_auto(frame, telemetry_data):
     )
     max_y = 0
     for cnt in contours:
-      # Ignore small floor noise/carpet grain by filtering contour area
       if cv2.contourArea(cnt) > 120:
         for pt in cnt:
           y_val = pt[0][1]
@@ -189,24 +193,22 @@ def process_indoor_auto(frame, telemetry_data):
   l_y = get_max_contour_y(left_roi)
   r_y = get_max_contour_y(right_roi)
 
-  # Danger distance threshold (Y >= 205 corresponds to ~8 inches from bumper)
   DANGER_Y_THRESHOLD = 205
 
   if c_y > DANGER_Y_THRESHOLD:
     if l_y < r_y and l_y < DANGER_Y_THRESHOLD:
-      return False, True, False, False  # Steer Left
+      return False, True, False, False
     elif r_y < DANGER_Y_THRESHOLD:
-      return False, False, False, True  # Steer Right
+      return False, False, False, True
     else:
       auto_state = 'RECOVER_BACK'
       recovery_timer = now
       turn_dir = 'l' if l_y < r_y else 'r'
-      return False, False, True, False  # Trigger reverse escape
+      return False, False, True, False
 
-  return True, False, False, False  # Path clear -> Drive Forward
+  return True, False, False, False
 
 
-# Pygame Setup
 pygame.init()
 info = pygame.display.Info()
 SCREEN_W, SCREEN_H = info.current_w, info.current_h
@@ -216,28 +218,21 @@ font_sm = pygame.font.SysFont('Arial', 18, bold=True)
 
 cap = cv2.VideoCapture(f'{BASE_URL}/video_feed')
 
-# HUD Button Rectangles
 BTN_SIZE = 55
 SPACING = 62
 CENTER_X = SCREEN_W // 2
 BOTTOM_Y = SCREEN_H - 80
 
-RECT_W = pygame.Rect(
-    CENTER_X - (BTN_SIZE // 2), BOTTOM_Y - SPACING, BTN_SIZE, BTN_SIZE
-)
-RECT_A = pygame.Rect(
-    CENTER_X - (BTN_SIZE // 2) - SPACING, BOTTOM_Y, BTN_SIZE, BTN_SIZE
-)
+RECT_W = pygame.Rect(CENTER_X - (BTN_SIZE // 2), BOTTOM_Y - SPACING, BTN_SIZE, BTN_SIZE)
+RECT_A = pygame.Rect(CENTER_X - (BTN_SIZE // 2) - SPACING, BOTTOM_Y, BTN_SIZE, BTN_SIZE)
 RECT_S = pygame.Rect(CENTER_X - (BTN_SIZE // 2), BOTTOM_Y, BTN_SIZE, BTN_SIZE)
-RECT_D = pygame.Rect(
-    CENTER_X - (BTN_SIZE // 2) + SPACING, BOTTOM_Y, BTN_SIZE, BTN_SIZE
-)
+RECT_D = pygame.Rect(CENTER_X - (BTN_SIZE // 2) + SPACING, BOTTOM_Y, BTN_SIZE, BTN_SIZE)
 
 RECT_REC = pygame.Rect(20, 20, 100, 40)
-RECT_TRANSFER = pygame.Rect(130, 20, 100, 40)
-RECT_SPEED = pygame.Rect(240, 20, 90, 40)
-RECT_RESET_HOME = pygame.Rect(340, 20, 100, 40)
-RECT_MODE = pygame.Rect(450, 20, 150, 40)
+RECT_TRANSFER = pygame.Rect(130, 20, 140, 40)
+RECT_SPEED = pygame.Rect(280, 20, 90, 40)
+RECT_RESET_HOME = pygame.Rect(380, 20, 100, 40)
+RECT_MODE = pygame.Rect(490, 20, 150, 40)
 RECT_SHUTDOWN = pygame.Rect(SCREEN_W - 140, 20, 120, 40)
 
 
@@ -248,26 +243,16 @@ def draw_button(rect, text, is_active, bg_color=None, text_color=(255, 255, 255)
 
   surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
   pygame.draw.rect(surf, bg_color, (0, 0, rect.width, rect.height), border_radius=8)
-  pygame.draw.rect(
-      surf,
-      border_color,
-      (0, 0, rect.width, rect.height),
-      width=2,
-      border_radius=8,
-  )
+  pygame.draw.rect(surf, border_color, (0, 0, rect.width, rect.height), width=2, border_radius=8)
 
   txt_surf = font_sm.render(text, True, text_color)
-  surf.blit(
-      txt_surf, txt_surf.get_rect(center=(rect.width // 2, rect.height // 2))
-  )
+  surf.blit(txt_surf, txt_surf.get_rect(center=(rect.width // 2, rect.height // 2)))
   screen.blit(surf, rect.topleft)
 
 
 def draw_hud_overlay():
   telemetry_bg = pygame.Surface((340, 130), pygame.SRCALPHA)
-  pygame.draw.rect(
-      telemetry_bg, (10, 10, 10, 190), (0, 0, 340, 130), border_radius=8
-  )
+  pygame.draw.rect(telemetry_bg, (10, 10, 10, 190), (0, 0, 340, 130), border_radius=8)
   screen.blit(telemetry_bg, (20, 70))
 
   x_m, y_m = telemetry['pos_x'], telemetry['pos_y']
@@ -279,9 +264,7 @@ def draw_hud_overlay():
     display_mode = f'AUTO ({auto_state})'
 
   t0 = font_sm.render(f'DRIVE MODE: {display_mode}', True, (255, 255, 0))
-  t1 = font_sm.render(
-      f'POSITION: X: {x_m:.2f}m  Y: {y_m:.2f}m', True, (240, 240, 240)
-  )
+  t1 = font_sm.render(f'POSITION: X: {x_m:.2f}m  Y: {y_m:.2f}m', True, (240, 240, 240))
   t2 = font_sm.render(f'DIST TO HOME: {dist:.2f} meters', True, (0, 255, 180))
   t3 = font_sm.render(f'RETURN HEADING: {head:.1f}°', True, (255, 215, 0))
   rec_display = telemetry['rec_file'] if telemetry['is_recording'] else 'OFF'
@@ -294,24 +277,10 @@ def draw_hud_overlay():
   screen.blit(t4, (30, 155))
 
   bat_pct = telemetry['battery_pct']
-  bat_col = (
-      (220, 50, 50, 220)
-      if bat_pct < 20
-      else ((220, 140, 0, 220) if bat_pct < 50 else (30, 180, 60, 220))
-  )
+  bat_col = (220, 50, 50, 220) if bat_pct < 20 else ((220, 140, 0, 220) if bat_pct < 50 else (30, 180, 60, 220))
 
-  draw_button(
-      pygame.Rect(SCREEN_W - 320, 20, 170, 40),
-      f"BAT: {bat_pct}% ({telemetry['voltage']}V)",
-      False,
-      bg_color=bat_col,
-  )
-  draw_button(
-      pygame.Rect(SCREEN_W - 320, 70, 170, 40),
-      f"SD FREE: {telemetry['free_storage_gb']}GB",
-      False,
-      bg_color=(30, 30, 30, 190),
-  )
+  draw_button(pygame.Rect(SCREEN_W - 320, 20, 170, 40), f"BAT: {bat_pct}% ({telemetry['voltage']}V)", False, bg_color=bat_col)
+  draw_button(pygame.Rect(SCREEN_W - 320, 70, 170, 40), f"SD FREE: {telemetry['free_storage_gb']}GB", False, bg_color=(30, 30, 30, 190))
 
 
 running = True
@@ -321,9 +290,7 @@ while running:
   mouse_pos = pygame.mouse.get_pos()
 
   for event in pygame.event.get():
-    if event.type == pygame.QUIT or (
-        event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
-    ):
+    if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
       running = False
     elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
       if RECT_REC.collidepoint(mouse_pos):
@@ -359,20 +326,11 @@ while running:
   mouse_pressed = pygame.mouse.get_pressed()[0]
   keys = pygame.key.get_pressed()
 
-  manual_w = keys[pygame.K_w] or (
-      mouse_pressed and RECT_W.collidepoint(mouse_pos)
-  )
-  manual_a = keys[pygame.K_a] or (
-      mouse_pressed and RECT_A.collidepoint(mouse_pos)
-  )
-  manual_s = keys[pygame.K_s] or (
-      mouse_pressed and RECT_S.collidepoint(mouse_pos)
-  )
-  manual_d = keys[pygame.K_d] or (
-      mouse_pressed and RECT_D.collidepoint(mouse_pos)
-  )
+  manual_w = keys[pygame.K_w] or (mouse_pressed and RECT_W.collidepoint(mouse_pos))
+  manual_a = keys[pygame.K_a] or (mouse_pressed and RECT_A.collidepoint(mouse_pos))
+  manual_s = keys[pygame.K_s] or (mouse_pressed and RECT_S.collidepoint(mouse_pos))
+  manual_d = keys[pygame.K_d] or (mouse_pressed and RECT_D.collidepoint(mouse_pos))
 
-  # Manual intervention cancels auto mode
   if manual_w or manual_a or manual_s or manual_d:
     drive_mode = 'manual'
     auto_state = 'FORWARD'
@@ -387,11 +345,10 @@ while running:
   s_act = manual_s or auto_s
   d_act = manual_d or auto_d
 
-  # Motor Command Dispatch (Swapped 'f' and 'b' to align with chassis mount)
   if w_act:
-    send_cmd('b')  # Forward
+    send_cmd('b')
   elif s_act:
-    send_cmd('f')  # Backward
+    send_cmd('f')
   elif a_act:
     send_cmd('l')
   elif d_act:
@@ -405,22 +362,31 @@ while running:
   draw_button(RECT_D, 'D', d_act)
 
   rec_text = 'STOP REC' if telemetry['is_recording'] else 'START REC'
-  rec_color = (
-      (220, 40, 40, 220) if telemetry['is_recording'] else (40, 40, 40, 190)
-  )
+  rec_color = (220, 40, 40, 220) if telemetry['is_recording'] else (40, 40, 40, 190)
   draw_button(RECT_REC, rec_text, False, bg_color=rec_color)
 
-  draw_button(RECT_TRANSFER, 'TRANSFER', False, bg_color=(40, 40, 40, 190))
+  # Transfer button status feedback
+  if transfer_status == 'DOWNLOADING':
+    transfer_label = f'{transfer_progress_mb:.1f}MB...'
+    transfer_bg = (200, 140, 0, 220)
+  elif transfer_status == 'SUCCESS':
+    transfer_label = 'DONE!'
+    transfer_bg = (30, 180, 60, 220)
+  elif transfer_status == 'FAILED':
+    transfer_label = 'FAILED'
+    transfer_bg = (220, 40, 40, 220)
+  else:
+    transfer_label = 'TRANSFER'
+    transfer_bg = (40, 40, 40, 190)
+
+  draw_button(RECT_TRANSFER, transfer_label, False, bg_color=transfer_bg)
+
   spd_mode = telemetry['speed_mode'].upper()
-  draw_button(
-      RECT_SPEED, f'SPD: {spd_mode}', False, bg_color=(40, 100, 200, 190)
-  )
+  draw_button(RECT_SPEED, f'SPD: {spd_mode}', False, bg_color=(40, 100, 200, 190))
   draw_button(RECT_RESET_HOME, 'SET HOME', False, bg_color=(40, 40, 40, 190))
 
   mode_button_text = 'AUTO INDOOR' if drive_mode == 'manual' else 'SET MANUAL'
-  mode_bg_color = (
-      (160, 40, 200, 220) if drive_mode == 'auto_indoor' else (40, 40, 40, 190)
-  )
+  mode_bg_color = (160, 40, 200, 220) if drive_mode == 'auto_indoor' else (40, 40, 40, 190)
   draw_button(RECT_MODE, mode_button_text, False, bg_color=mode_bg_color)
 
   draw_button(RECT_SHUTDOWN, 'OFF PI', False, bg_color=(180, 30, 30, 220))
