@@ -1,0 +1,8 @@
+frame_width: 320
+frame_height: 240
+
+points:
+  - [20, 240]    # bottom-left
+  - [300, 240]   # bottom-right
+  - [200, 150]   # top-right
+  - [120, 150]   # top-left

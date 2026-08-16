@@ -1,0 +1,15 @@
+homography:
+- - -0.31095086942915884
+  - 0.3408920990860742
+  - -17.232378226344842
+- - 0.31944033865605653
+  - -0.20882550383208426
+  - -87.23407564335444
+- - 0.008623828611409607
+  - -0.019845213551845264
+  - 1.0
+calibration_date: '2026-08-15'
+image_width: 320
+image_height: 240
+units: cm
+notes: 'Maps camera pixel coordinates (x, y) to ground-plane coordinates (x, y) in cm.'

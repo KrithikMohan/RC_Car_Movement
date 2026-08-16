@@ -1,0 +1,3 @@
+window_size: 5
+min_confidence: 0.5
+horizontal_angle_threshold_deg: 20.0

@@ -1,0 +1,2 @@
+frame_timeout_ms: 500.0
+stall_timeout_ms: 500.0
