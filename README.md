@@ -50,13 +50,3 @@ All tunable parameters live in `config/*.yaml`:
 
 ---
 
-## Feature Progress & Status Matrix
-
-| Feature | Status | Completion | Notes |
-| :--- | :--- | :--- | :--- |
-| **Flask REST Server & Serial Relay** | Operational | `[██████████] 100%` | Hardware serial communications and API endpoints stable. |
-| **Pygame Control HUD & Teleoperation** | Operational | `[██████████] 100%` | Full WASD driving, GUI buttons, and instant override working. |
-| **Video Streaming & Local MP4 Transfer** | Operational | `[██████████] 100%` | Thread-safe MJPEG streaming and asynchronous file offloading verified. |
-| **Watchdog Failsafe & Dead-Reckoning** | Operational | `[██████████] 100%` | Automatic motor cut-off on signal drop and telemetry active. |
-| **Outdoor Auto Navigation (Curb Follow & Obstacles)** | Operational | `[██████████] 100%` | Full `rccar` pipeline integrated: curb tracking, corridor maintenance, obstacle braking, and HUD overlays. |
-| **Single-Camera Indoor Auto Navigation** | Deprecated | `[██████████] 100%` | Superseded by the unified `rccar` corridor vision and obstacle pipeline. |
