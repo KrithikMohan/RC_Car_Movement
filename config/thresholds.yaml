@@ -1,2 +1,3 @@
-stop_distance_cm: 30.0
-slow_distance_cm: 100.0
+stop_distance_cm: 45.0
+slow_distance_cm: 120.0
+

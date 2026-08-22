@@ -161,8 +161,8 @@ class UGV02SerialAdapter:
     MAX_STEER_Z = 1.40  # rad/s angular deflection at 100% steer
     SPEED_MAP = {
         0: 0.0,    # STOP
-        1: -0.40,  # SLOW (m/s)
-        2: -0.70,  # FULL (m/s)
+        1: -0.20,  # SLOW (m/s)
+        2: -0.35,  # FULL (m/s)
     }
 
     def __init__(self):
@@ -486,7 +486,7 @@ class CameraGrabber:
     Reads frames from physical camera device into a synchronized memory buffer,
     allowing simultaneous non-blocking access by Flask streaming and rccar CV.
     """
-    def __init__(self, device_indices=(1, 2, 0)):
+    def __init__(self, device_indices=(0, 1, 2)):
         self.cap = None
         self.lock = threading.Lock()
         self.latest_frame = None
@@ -567,7 +567,7 @@ class GrabberFrameSource:
 
 def start_auto_pipeline():
     """Launches the rccar autonomous perception and navigation pipeline in a background thread."""
-    global auto_thread, auto_running, drive_mode, auto_stop_event
+    global auto_thread, auto_running, drive_mode, auto_stop_event, telemetry_data
     if not RCCAR_AVAILABLE:
         print("[AUTO WARNING] rccar module not found on system. Auto mode cannot be started.")
         return False
@@ -577,11 +577,12 @@ def start_auto_pipeline():
 
     auto_stop_event.clear()
     perception_store.clear()
+    auto_running = True
+    drive_mode = 'auto'
+    telemetry_data['drive_mode'] = 'auto'
 
     def _worker():
-        global auto_running, drive_mode
-        auto_running = True
-        drive_mode = 'auto'
+        global auto_running, drive_mode, telemetry_data
         print("[AUTO] Starting rccar autonomous roadside driving pipeline...")
 
         source = None
@@ -634,6 +635,7 @@ def start_auto_pipeline():
                     pass
             auto_running = False
             drive_mode = 'manual'
+            telemetry_data['drive_mode'] = 'manual'
             with motion_lock:
                 global target_x, target_z
                 target_x = 0.0
@@ -648,16 +650,18 @@ def start_auto_pipeline():
 
 def stop_auto_pipeline():
     """Safely stops the rccar autonomous driving pipeline."""
-    global auto_running, drive_mode, auto_stop_event
-    if auto_running:
-        auto_stop_event.set()
-        auto_running = False
-        drive_mode = 'manual'
-        with motion_lock:
-            global target_x, target_z
-            target_x = 0.0
-            target_z = 0.0
-        send_serial('{"T":13,"X":0.0,"Z":0.0}')
+    global auto_running, drive_mode, auto_stop_event, telemetry_data
+    auto_stop_event.set()
+    was_running = auto_running
+    auto_running = False
+    drive_mode = 'manual'
+    telemetry_data['drive_mode'] = 'manual'
+    with motion_lock:
+        global target_x, target_z
+        target_x = 0.0
+        target_z = 0.0
+    send_serial('{"T":13,"X":0.0,"Z":0.0}')
+    if was_running:
         print("[AUTO] Manual override: stopped rccar pipeline.")
 
 

@@ -5,7 +5,7 @@ import cv2
 import pygame
 import requests
 
-PI_IP = '10.255.254.35'  # Update to active Raspberry Pi IP
+PI_IP = '10.42.0.1'  # Update to active Raspberry Pi IP
 BASE_URL = f'http://{PI_IP}:5000'
 DOWNLOAD_DIR = os.path.expanduser('~/Downloads')
 
@@ -34,14 +34,42 @@ transfer_status = 'IDLE'  # 'IDLE', 'DOWNLOADING', 'SUCCESS', 'FAILED'
 transfer_progress_mb = 0.0
 
 
-def send_post(endpoint, json_data=None):
+auto_err_time = 0.0
+
+
+def send_post(endpoint, json_data=None, on_success=None, on_error=None):
     def _post():
         try:
-            requests.post(f'{BASE_URL}/{endpoint}', json=json_data, timeout=1.0)
+            res = requests.post(f'{BASE_URL}/{endpoint}', json=json_data, timeout=1.0)
+            if res.status_code == 200:
+                if on_success:
+                    on_success(res.json())
+            else:
+                if on_error:
+                    on_error(res)
+                print(f'[NET ERROR] {endpoint} returned {res.status_code}: {res.text}')
         except Exception as e:
+            if on_error:
+                on_error(e)
             print(f'[NET ERROR] {endpoint}: {e}')
 
     threading.Thread(target=_post, daemon=True).start()
+
+
+def toggle_auto_mode():
+    global telemetry, auto_err_time
+    target_mode = 'manual' if telemetry.get('drive_mode') == 'auto' else 'auto'
+
+    def _on_success(data):
+        server_mode = data.get('mode', target_mode)
+        telemetry['drive_mode'] = server_mode
+
+    def _on_error(err):
+        global auto_err_time
+        auto_err_time = time.time()
+        print(f'[AUTO TOGGLE FAILED] Could not switch to {target_mode}: {err}')
+
+    send_post('mode', {'mode': target_mode}, on_success=_on_success, on_error=_on_error)
 
 
 def send_cmd(cmd):
@@ -205,9 +233,7 @@ while running:
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_m:
                 # Toggle Autonomous Driving Mode
-                new_mode = 'manual' if telemetry.get('drive_mode') == 'auto' else 'auto'
-                send_post('mode', {'mode': new_mode})
-                telemetry['drive_mode'] = new_mode
+                toggle_auto_mode()
             elif event.key == pygame.K_SPACE:
                 # Emergency Stop
                 send_post('mode', {'mode': 'manual'})
@@ -226,9 +252,7 @@ while running:
                 new_mode = 'high' if telemetry.get('speed_mode') == 'low' else 'low'
                 send_post('speed', {'mode': new_mode})
             elif RECT_AUTO.collidepoint(mouse_pos):
-                new_mode = 'manual' if telemetry.get('drive_mode') == 'auto' else 'auto'
-                send_post('mode', {'mode': new_mode})
-                telemetry['drive_mode'] = new_mode
+                toggle_auto_mode()
             elif RECT_RESET_HOME.collidepoint(mouse_pos):
                 send_post('reset_origin')
                 telemetry['pos_x'] = 0.0
@@ -259,6 +283,7 @@ while running:
     # Any manual keypress immediately overrides auto mode
     if (w_act or a_act or s_act or d_act) and telemetry.get('drive_mode') == 'auto':
         telemetry['drive_mode'] = 'manual'
+        send_post('mode', {'mode': 'manual'})
 
     # Smooth combined driving and steering commands
     if w_act and a_act:
@@ -310,8 +335,12 @@ while running:
 
     # Auto Mode Button
     is_auto = telemetry.get('drive_mode') == 'auto'
-    auto_label = 'AUTO: ON' if is_auto else 'AUTO: OFF'
-    auto_bg = (0, 180, 70, 220) if is_auto else (40, 40, 40, 190)
+    if time.time() - auto_err_time < 2.0:
+        auto_label = 'AUTO: ERR'
+        auto_bg = (220, 40, 40, 220)
+    else:
+        auto_label = 'AUTO: ON' if is_auto else 'AUTO: OFF'
+        auto_bg = (0, 180, 70, 220) if is_auto else (40, 40, 40, 190)
     draw_button(RECT_AUTO, auto_label, is_auto, bg_color=auto_bg)
 
     draw_button(RECT_RESET_HOME, 'SET HOME', False, bg_color=(40, 40, 40, 190))
