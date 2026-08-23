@@ -735,21 +735,42 @@ def start_auto_pipeline():
                 slow_distance_cm=slow_distance_cm,
             )
 
-            def _scan_for_clear_path():
+            # Positive angular_z is a left turn, negative is right (matches
+            # UGV02SerialAdapter.send_command's steer convention: negative
+            # steer/left -> positive Z).
+            _TURN_LEFT = SCAN_ANGULAR_RATE_RAD_S
+            _TURN_RIGHT = -SCAN_ANGULAR_RATE_RAD_S
+
+            def _scan_for_clear_path(blocked_result):
                 """Pivot in SCAN_STEP_DEG increments, re-checking for a
                 clear path after each, up to SCAN_MAX_DEG total. Returns
                 the process_frame() result that found a clear path, or
                 None if still blocked after the full scan (caller should
                 treat that as a confirmed, final STOP).
 
-                Turns a single direction (right) each call; this is an
-                arbitrary but consistent default, not derived from which
-                side actually has more room.
+                Direction: turn away from a tracked curb (curb behind/
+                beside the car is the one obstacle we know isn't drivable
+                regardless of what the scan sees). If no curb is tracked,
+                there's nothing to derive a direction from, so start left;
+                if the very first step makes the obstacle reading worse
+                (closer than it was before turning), that guess was wrong
+                -- switch to right for the remaining steps.
                 """
+                curb_side = blocked_result.get("curb_side")
+                if curb_side == "left":
+                    direction = _TURN_RIGHT
+                elif curb_side == "right":
+                    direction = _TURN_LEFT
+                else:
+                    direction = _TURN_LEFT
+
+                pre_scan_distance_cm = blocked_result.get("obstacle_distance_cm")
+                direction_confirmed = curb_side in ("left", "right")
+
                 degrees_turned = 0
                 while degrees_turned < SCAN_MAX_DEG and not auto_stop_event.is_set():
                     try:
-                        adapter.pivot(-SCAN_ANGULAR_RATE_RAD_S)
+                        adapter.pivot(direction)
                         time.sleep(SCAN_STEP_DURATION_S)
                     finally:
                         adapter.pivot(0.0)
@@ -769,6 +790,19 @@ def start_auto_pipeline():
                     })
                     if recheck["speed"] != SpeedTier.STOP:
                         return recheck
+
+                    if not direction_confirmed:
+                        # First step of an undirected (no-curb) scan: check
+                        # whether guessing left made things worse.
+                        new_distance_cm = recheck.get("obstacle_distance_cm")
+                        if (
+                            pre_scan_distance_cm is not None
+                            and new_distance_cm is not None
+                            and new_distance_cm < pre_scan_distance_cm
+                        ):
+                            direction = _TURN_RIGHT
+                        direction_confirmed = True
+
                 return None
 
             frame_count = 0
@@ -785,7 +819,7 @@ def start_auto_pipeline():
                     # Hold fully stopped before pivoting -- don't start a
                     # scan turn while still carrying forward momentum.
                     watchdog.write_command(SpeedTier.STOP, 0)
-                    cleared = _scan_for_clear_path()
+                    cleared = _scan_for_clear_path(result)
                     if cleared is not None:
                         # Path is clear at the new heading: drive straight
                         # out of the turn rather than continuing to steer,
