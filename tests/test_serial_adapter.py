@@ -1,6 +1,6 @@
 import json
 import pytest
-from pi_server import UGV02SerialAdapter, send_serial
+from pi_server import SCAN_MAX_DEG, UGV02SerialAdapter, send_serial
 
 
 def test_serial_adapter_speed_mapping(monkeypatch):
@@ -87,3 +87,10 @@ def test_serial_adapter_version_header_ignored(monkeypatch):
     adapter = UGV02SerialAdapter()
     adapter.write(b"V,1\n")
     assert len(sent_commands) == 0
+
+
+def test_scan_max_deg_limited_to_avoid_entering_road():
+    # The obstacle-avoidance scan must only nudge the car around an
+    # obstacle, never turn far enough to point it out into the middle of
+    # the road it's supposed to stay off of (a quarter turn or more).
+    assert SCAN_MAX_DEG < 45

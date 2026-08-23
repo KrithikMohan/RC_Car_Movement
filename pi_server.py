@@ -140,11 +140,14 @@ DECEL_Z = 4.8   # rad/s^2 angular deceleration ramp (clean exit from turns)
 # Auto-mode obstacle-avoidance scan: when blocked, pivot in place by
 # SCAN_STEP_DEG at a time (re-checking for a clear path after each step)
 # up to a total of SCAN_MAX_DEG before giving up and stopping for good.
+# SCAN_MAX_DEG is deliberately small: the car must stay next to the curb
+# it's following, so the scan may only nudge it around a small obstacle,
+# never turn far enough to point it out into the middle of the road.
 # SCAN_ANGULAR_RATE_RAD_S is deliberately well under UGV02SerialAdapter's
 # MAX_STEER_Z (1.40 rad/s) -- this pivot has no forward speed to help
 # stabilize it, so a slower, more controllable rate is used.
 SCAN_STEP_DEG = 10
-SCAN_MAX_DEG = 90
+SCAN_MAX_DEG = 30
 SCAN_ANGULAR_RATE_RAD_S = 0.7
 SCAN_STEP_DURATION_S = math.radians(SCAN_STEP_DEG) / SCAN_ANGULAR_RATE_RAD_S
 
