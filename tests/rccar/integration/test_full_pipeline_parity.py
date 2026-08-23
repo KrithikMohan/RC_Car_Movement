@@ -44,7 +44,10 @@ _REPO_ROOT_HOMOGRAPHY = os.path.join(
     "homography.yaml",
 )
 
-FRAME_SIZE = (160, 120)  # width, height
+FRAME_SIZE = (320, 240)  # width, height -- matches the resolution config/roi.yaml
+# and config/homography.yaml were calibrated against; obstacle_distance_cm
+# is only meaningful (and the horizon/max-range guards only line up
+# correctly) at this resolution.
 NUM_FRAMES = 7
 
 # Fields compared with an exact equality check: these are discrete/integer
@@ -96,20 +99,23 @@ def _make_varying_video(path: str, num_frames: int) -> None:
             # Road-colored background (greenish)
             frame = np.full((height, width, 3), (80, 100, 80), dtype=np.uint8)
 
-            # Vary obstacle size and position to trigger different obstacle distances
-            # and steer values across frames
-            obstacle_size = 5 + (i * 8) % 20  # obstacle grows/shrinks across frames
-            obstacle_x = 30 + (i * 25) % (width - obstacle_size)  # moves left/right
-            obstacle_y = 60 + (i * 10) % (height - obstacle_size)
-
-            # Draw dark obstacle (non-road color) with enough contrast
-            cv2.rectangle(
-                frame,
-                (obstacle_x, obstacle_y),
-                (obstacle_x + obstacle_size, obstacle_y + obstacle_size),
-                (20, 20, 20),  # dark color, clearly non-road
-                -1,
-            )
+            # Frame 0 stays obstacle-free (it seeds the road-color model);
+            # later frames place a saturated, clearly non-road obstacle low
+            # in the frame -- within the ROI's near-field band and within
+            # nearest_obstacle_real_distance's forward-range guard -- so
+            # this fixture produces a genuine FULL -> SLOW/STOP transition
+            # rather than relying on incidental video-codec noise.
+            if i > 0:
+                obstacle_size = 20 + (i * 8) % 20
+                obstacle_x = 100 + (i * 25) % (width - 200 - obstacle_size)
+                obstacle_y = 236 - obstacle_size
+                cv2.rectangle(
+                    frame,
+                    (obstacle_x, obstacle_y),
+                    (obstacle_x + obstacle_size, 236),
+                    (0, 0, 200),  # saturated red, clearly non-road
+                    -1,
+                )
 
             # Draw a curb line that shifts side to trigger steer variation
             curb_x = 40 + (i * 20) % (width - 60)  # moves across frame

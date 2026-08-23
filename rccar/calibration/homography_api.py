@@ -121,6 +121,7 @@ def nearest_obstacle_distance(
     homography: np.ndarray,
     obstacle_image_points: Sequence[tuple[float, float]],
     horizon_y: Optional[float] = None,
+    max_forward_cm: Optional[float] = None,
 ) -> Optional[float]:
     """Return the distance (in cm) to the nearest obstacle.
 
@@ -144,11 +145,16 @@ def nearest_obstacle_distance(
             pixel coordinates.
         horizon_y: forwarded to `image_point_to_ground`; points above
             this y are ignored.
+        max_forward_cm: if given, obstacles farther than this in the
+            forward (ground-plane Y) direction are not considered
+            obstacles at all, regardless of lateral (X) offset -- this
+            bounds detection range straight ahead without penalizing
+            things that are simply off to the side.
 
     Returns:
         Minimum ground-plane distance in cm across all valid (below-
-        horizon) obstacle points, or None if the input list is empty
-        or every point is above the horizon.
+        horizon, within max_forward_cm) obstacle points, or None if the
+        input list is empty or no point qualifies.
     """
     best: Optional[float] = None
     for point in obstacle_image_points:
@@ -156,6 +162,8 @@ def nearest_obstacle_distance(
         if ground is None:
             continue
         x, y = ground
+        if max_forward_cm is not None and y > max_forward_cm:
+            continue
         distance = math.hypot(x, y)
         if best is None or distance < best:
             best = distance

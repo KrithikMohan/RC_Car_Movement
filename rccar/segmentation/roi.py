@@ -51,6 +51,16 @@ def load_roi_points(config_path: Optional[Path] = None) -> List[Point]:
     return points
 
 
+def load_roi_reference_frame_size(config_path: Optional[Path] = None) -> Tuple[int, int]:
+    """Load the ``(frame_width, frame_height)`` the ROI's points were authored
+    against, so callers can scale those points to a differently-sized frame.
+    """
+    path = Path(config_path) if config_path is not None else _DEFAULT_CONFIG_PATH
+    with open(path, "r") as f:
+        data = yaml.safe_load(f)
+    return int(data["frame_width"]), int(data["frame_height"])
+
+
 def _clip_points(points: Sequence[Point], width: int, height: int) -> List[Point]:
     """Clip ROI points into ``[0, width-1] x [0, height-1]`` bounds.
 

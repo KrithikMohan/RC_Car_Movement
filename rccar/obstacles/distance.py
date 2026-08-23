@@ -23,6 +23,7 @@ def nearest_obstacle_real_distance(
     obstacles: List[Obstacle],
     homography: np.ndarray,
     horizon_y: Optional[float] = None,
+    max_forward_cm: Optional[float] = None,
 ) -> Optional[float]:
     """Return the real-world (ground-plane) distance in cm to the nearest obstacle.
 
@@ -35,11 +36,16 @@ def nearest_obstacle_real_distance(
         horizon_y: forwarded to ``nearest_obstacle_distance``; obstacle
             centroids above this image y-coordinate are ignored as not
             being on the ground plane.
+        max_forward_cm: forwarded to ``nearest_obstacle_distance``;
+            obstacles farther ahead than this are ignored regardless of
+            lateral offset.
 
     Returns:
         Minimum ground-plane distance in cm across all valid (below-
-        horizon) obstacles, or None if ``obstacles`` is empty or every
-        centroid is above the horizon.
+        horizon, within max_forward_cm) obstacles, or None if
+        ``obstacles`` is empty or none qualify.
     """
     centroids = [obstacle.centroid for obstacle in obstacles]
-    return nearest_obstacle_distance(homography, centroids, horizon_y=horizon_y)
+    return nearest_obstacle_distance(
+        homography, centroids, horizon_y=horizon_y, max_forward_cm=max_forward_cm
+    )

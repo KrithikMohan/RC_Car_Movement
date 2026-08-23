@@ -84,6 +84,7 @@ from rccar.decision.steer import compute_steer
 from rccar.obstacles.detect import define_corridor, detect_obstacles
 from rccar.obstacles.distance import nearest_obstacle_real_distance
 from rccar.segmentation.classify import AdaptiveClassifier
+from rccar.segmentation.roi import load_roi_points, load_roi_reference_frame_size
 from rccar.serial_client.client import SerialClient, SerialClientError
 from rccar.watchdog.watchdog import Watchdog
 
@@ -190,6 +191,13 @@ class PipelineState:
     stop_distance_cm: float = 30.0
     slow_distance_cm: float = 100.0
     frame_index: int = 0
+    # Fraction of frame height (0-1), not a raw pixel row: roi.yaml's points
+    # are authored against a fixed 320x240 reference frame, so a cached
+    # pixel value wouldn't scale to whatever resolution frames actually
+    # arrive at (e.g. the live pipeline runs at 320x240, but test/calibration
+    # frames can be smaller).
+    horizon_y_frac: Optional[float] = None
+    max_obstacle_range_cm: Optional[float] = 60.96  # 2 ft; farther objects are ignored entirely
 
 
 def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
@@ -234,7 +242,31 @@ def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
         frame.shape, curb_side, curb_x=curb_x, fallback_band_frac=fallback_band_frac
     )
     obstacles = detect_obstacles(frame, road_mask, corridor_mask)
-    obstacle_distance_cm = nearest_obstacle_real_distance(obstacles, state.homography)
+    # nearest_obstacle_real_distance's horizon_y guard is documented as
+    # required here ("callers are assumed to have already filtered image
+    # points to the region of interest ... before calling this function")
+    # but was never wired up: without it, pixels above the ROI's near-field
+    # sampling region -- which the road-color model was never calibrated
+    # against, so they misclassify as non-road constantly (far floor,
+    # walls, background) -- get reprojected through the ground homography
+    # anyway. Near/above the vanishing line that reprojection is unstable
+    # and produces deceptively close-looking distances, pinning speed at
+    # STOP even with a clear path ahead. Guard at the ROI's own top edge,
+    # the same near-field region the classifier is actually trained on.
+    #
+    # roi.yaml's points are authored against a fixed reference frame size,
+    # not necessarily this frame's actual size, so the top edge is cached
+    # as a fraction of frame height and rescaled per frame.
+    if state.horizon_y_frac is None:
+        ref_width, ref_height = load_roi_reference_frame_size()
+        state.horizon_y_frac = min(y for _, y in load_roi_points()) / ref_height
+    horizon_y = state.horizon_y_frac * frame.shape[0]
+    obstacle_distance_cm = nearest_obstacle_real_distance(
+        obstacles,
+        state.homography,
+        horizon_y=horizon_y,
+        max_forward_cm=state.max_obstacle_range_cm,
+    )
 
     raw_speed = decide_speed_tier(
         obstacle_distance_cm,
