@@ -212,6 +212,41 @@ def test_run_pipeline_no_curb_uses_centered_band_not_full_frame_corridor(tmp_pat
     assert all(frac == 0.6 for frac in seen_fracs)
 
 
+def test_process_frame_stops_when_dangerously_close_to_tracked_curb(monkeypatch):
+    """Regression test: compute_steer only ever corrects heading, it never
+    touches speed. Without a curb-proximity speed cap, a car with no
+    obstacle in front (obstacle_distance_cm=None -> FULL) but only a few cm
+    from a tracked curb would keep driving FULL speed while steering away
+    -- exactly the gap that let a real unit crash into a curb it was
+    correctly steering away from, because the steer correction couldn't
+    act fast enough at full speed. Speed must be capped by curb proximity
+    the same way it is by obstacle proximity."""
+    import rccar.main as main_module
+
+    monkeypatch.setattr(main_module, "detect_curb_side", lambda frame: ("left", 1.0))
+    monkeypatch.setattr(
+        main_module, "estimate_curb_offset_cm", lambda frame, curb_side, homography: (10.0, 3.2)
+    )
+    monkeypatch.setattr(main_module, "detect_obstacles", lambda frame, road_mask, corridor_mask: [])
+
+    homography = load_homography(_REPO_ROOT_HOMOGRAPHY)
+    state = PipelineState(
+        classifier=AdaptiveClassifier(),
+        curb_tracker=CurbConfidenceTracker(),
+        homography=homography,
+        speed_smoother=MajorityVoteSmoother(),
+        steer_smoother=MajorityVoteSmoother(),
+        stop_confirm_frames=1,
+    )
+    frame = np.zeros((*FRAME_SIZE[::-1], 3), dtype=np.uint8)
+
+    result = process_frame(frame, state)
+
+    assert result["obstacle_distance_cm"] is None
+    assert result["current_offset_cm"] == 3.2
+    assert result["speed"] == SpeedTier.STOP
+
+
 def test_process_frame_is_deterministic_given_identical_state_inputs():
     """process_frame must behave identically for identical (frame, state)
     inputs, independent of any hidden global state -- the property T28's

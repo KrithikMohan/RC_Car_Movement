@@ -202,6 +202,16 @@ class PipelineState:
     # trusted (see the STOP-confirmation comment in process_frame below).
     stop_confirm_frames: int = 3
     consecutive_raw_stop_frames: int = 0
+    # Curb-proximity speed cap: compute_steer only ever corrects the
+    # heading, it never touches speed, so a car driving FULL speed a few cm
+    # from a tracked curb has nothing braking it while the steer correction
+    # (and the curb tracker, which can lose the line entirely at very close
+    # range) catches up -- that gap is what drives it into the curb. These
+    # mirror stop_distance_cm/slow_distance_cm but against curb offset
+    # instead of obstacle distance, so proximity to the curb itself throttles
+    # speed the same way an obstacle ahead does.
+    curb_stop_offset_cm: float = 15.0
+    curb_slow_offset_cm: float = 25.0
 
 
 def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
@@ -272,11 +282,22 @@ def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
         max_forward_cm=state.max_obstacle_range_cm,
     )
 
-    raw_speed = decide_speed_tier(
+    obstacle_speed = decide_speed_tier(
         obstacle_distance_cm,
         stop_distance_cm=state.stop_distance_cm,
         slow_distance_cm=state.slow_distance_cm,
     )
+    # Curb proximity also throttles speed, independent of obstacles: only
+    # meaningful while actually tracking a curb (current_offset_cm is a
+    # stale/None value otherwise, per estimate_curb_offset_cm).
+    curb_speed = SpeedTier.FULL
+    if curb_side is not None and current_offset_cm is not None:
+        curb_speed = decide_speed_tier(
+            current_offset_cm,
+            stop_distance_cm=state.curb_stop_offset_cm,
+            slow_distance_cm=state.curb_slow_offset_cm,
+        )
+    raw_speed = min(obstacle_speed, curb_speed)
     # STOP is safety-critical and must never wait on the majority-vote
     # smoother's temporal consensus (it needs 2-of-3 recent frames to
     # agree before a new value wins) -- that lag is fine for SLOW/FULL
