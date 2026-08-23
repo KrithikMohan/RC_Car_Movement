@@ -722,6 +722,14 @@ def start_auto_pipeline():
                 watchdog.on_frame_received()
                 result = process_frame(frame, state)
 
+                _state_cb({
+                    'nearest_distance_cm': result.get('obstacle_distance_cm'),
+                    'curb_offset_cm': result.get('current_offset_cm'),
+                    'curb_side': result.get('curb_side'),
+                    'speed_tier': result.get('speed'),
+                    'steer': result.get('steer'),
+                })
+
                 if result["speed"] == SpeedTier.STOP:
                     # A blocked path is a final stop: the car must stay next
                     # to the curb it's following, never pivot/maneuver away
@@ -736,14 +744,6 @@ def start_auto_pipeline():
                     continue
 
                 watchdog.write_command(result["speed"], result["steer"])
-
-                _state_cb({
-                    'nearest_distance_cm': result.get('obstacle_distance_cm'),
-                    'curb_offset_cm': result.get('current_offset_cm'),
-                    'curb_side': result.get('curb_side'),
-                    'speed_tier': result.get('speed'),
-                    'steer': result.get('steer'),
-                })
 
                 frame_count += 1
                 if frame_count % 10 == 0:
