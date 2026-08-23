@@ -75,3 +75,44 @@ def test_defaults_loaded_when_not_specified():
 
     assert tracker.window_n == 5
     assert tracker.min_confidence == 0.2
+
+
+def test_single_frame_side_flicker_does_not_flip_tracked_side():
+    """Regression test: a lone misdetected frame reporting the opposite
+    side while already tracking must NOT instantly flip current_side.
+    Steering direction is derived directly from current_side, so an
+    instant flip reverses the correction that same frame -- "steering
+    away" from the wrongly-reported side actually steers into the real
+    curb on the other side of the frame."""
+    window_n = 3
+    tracker = CurbConfidenceTracker(window_n=window_n, min_confidence=0.2)
+
+    tracker.update("right", 0.9)
+    tracker.update("right", 0.9)
+    assert tracker.current_side == "right"
+
+    # A single stray "left" frame must not flip it.
+    tracker.update("left", 0.8)
+    assert tracker.current_side == "right"
+    assert tracker.state == "tracking"
+
+    # Reverting back to "right" resets the pending-switch counter.
+    tracker.update("right", 0.9)
+    assert tracker.current_side == "right"
+
+
+def test_side_change_confirmed_after_window_n_plus_1_consecutive_frames():
+    window_n = 3
+    tracker = CurbConfidenceTracker(window_n=window_n, min_confidence=0.2)
+
+    tracker.update("right", 0.9)
+    assert tracker.current_side == "right"
+
+    # window_n consecutive "left" frames: not yet confirmed.
+    for i in range(window_n):
+        tracker.update("left", 0.8)
+        assert tracker.current_side == "right", f"switched too early at frame {i}"
+
+    # The (window_n + 1)-th consecutive "left" frame confirms the switch.
+    tracker.update("left", 0.8)
+    assert tracker.current_side == "left"

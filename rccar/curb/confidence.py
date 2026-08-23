@@ -24,6 +24,18 @@ State-machine rules (implemented exactly, see module tests)
   system that wants more hysteresis on the way back in can wrap this
   tracker or require several found updates before acting on
   ``curb_available``.
+* Side changes while already ``"tracking"`` get the same ``window_n + 1``
+  grace window as a disappearance does: a **found** frame reporting a
+  *different* side than the one currently tracked does not immediately
+  switch ``current_side`` -- it must be seen ``window_n + 1`` consecutive
+  times first. Without this, a single stray misdetection (e.g. a Hough
+  line briefly picked from something other than the real curb) instantly
+  flips ``current_side``, which flips the steering direction the very
+  same frame -- steering "away" from a wrongly-reported side drives
+  straight into the real curb on the other side of the frame instead of
+  away from it. A momentary flicker keeps the previously tracked side
+  until the new one is confirmed; a genuine side change (car actually
+  crossing to the other curb) still gets picked up, just not on frame one.
 * Before any frames have been seen, the tracker starts in ``"fallback"``
   with no side (nothing has been found yet, so there is nothing to track).
 """
@@ -90,6 +102,11 @@ class CurbConfidenceTracker:
         self._consecutive_missing: int = 0
         self._state: str = "fallback"
         self._current_side: Optional[str] = None
+        # Consecutive-count of a candidate side differing from
+        # `_current_side` while already tracking -- see the module
+        # docstring's "Side changes while already tracking" rule.
+        self._pending_side: Optional[str] = None
+        self._pending_count: int = 0
 
     def update(self, side: str, confidence: float) -> None:
         """Feed one frame's ``detect_curb_side`` output into the tracker."""
@@ -98,12 +115,30 @@ class CurbConfidenceTracker:
 
         if found:
             self._consecutive_missing = 0
-            self._current_side = side
+            if self._state != "tracking" or self._current_side is None or side == self._current_side:
+                self._current_side = side
+                self._pending_side = None
+                self._pending_count = 0
+            else:
+                # Candidate side disagrees with the one currently tracked:
+                # require window_n + 1 consecutive frames on the new side
+                # before actually switching (see module docstring).
+                if side == self._pending_side:
+                    self._pending_count += 1
+                else:
+                    self._pending_side = side
+                    self._pending_count = 1
+                if self._pending_count >= self.window_n + 1:
+                    self._current_side = side
+                    self._pending_side = None
+                    self._pending_count = 0
             # Reappearance rule: the very next found frame flips fallback
             # back to tracking (see module docstring).
             self._state = "tracking"
         else:
             self._consecutive_missing += 1
+            self._pending_side = None
+            self._pending_count = 0
             if self._state == "tracking" and self._consecutive_missing >= self.window_n + 1:
                 self._state = "fallback"
                 self._current_side = None
