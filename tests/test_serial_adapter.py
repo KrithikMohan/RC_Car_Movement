@@ -1,6 +1,6 @@
 import json
 import pytest
-from pi_server import SCAN_MAX_DEG, UGV02SerialAdapter, send_serial
+from pi_server import UGV02SerialAdapter, send_serial
 
 
 def test_serial_adapter_speed_mapping(monkeypatch):
@@ -57,26 +57,6 @@ def test_serial_adapter_steer_kinematics(monkeypatch):
     assert pytest.approx(data["Z"], 0.001) == -0.700
 
 
-def test_serial_adapter_pivot_holds_zero_linear_velocity(monkeypatch):
-    sent_commands = []
-    def mock_send_serial(cmd):
-        sent_commands.append(cmd)
-
-    monkeypatch.setattr("pi_server.send_serial", mock_send_serial)
-
-    adapter = UGV02SerialAdapter()
-
-    adapter.pivot(-0.7)
-    data = json.loads(sent_commands[-1])
-    assert pytest.approx(data["X"], 0.001) == 0.000
-    assert pytest.approx(data["Z"], 0.001) == -0.700
-
-    adapter.pivot(0.0)
-    data = json.loads(sent_commands[-1])
-    assert pytest.approx(data["X"], 0.001) == 0.000
-    assert pytest.approx(data["Z"], 0.001) == 0.000
-
-
 def test_serial_adapter_version_header_ignored(monkeypatch):
     sent_commands = []
     def mock_send_serial(cmd):
@@ -87,10 +67,3 @@ def test_serial_adapter_version_header_ignored(monkeypatch):
     adapter = UGV02SerialAdapter()
     adapter.write(b"V,1\n")
     assert len(sent_commands) == 0
-
-
-def test_scan_max_deg_limited_to_avoid_entering_road():
-    # The obstacle-avoidance scan must only nudge the car around an
-    # obstacle, never turn far enough to point it out into the middle of
-    # the road it's supposed to stay off of (a quarter turn or more).
-    assert SCAN_MAX_DEG < 45

@@ -137,20 +137,6 @@ DECEL_X = 3.2   # m/s^2 linear braking ramp
 ACCEL_Z = 3.8   # rad/s^2 angular acceleration ramp (soft entry into turns)
 DECEL_Z = 4.8   # rad/s^2 angular deceleration ramp (clean exit from turns)
 
-# Auto-mode obstacle-avoidance scan: when blocked, pivot in place by
-# SCAN_STEP_DEG at a time (re-checking for a clear path after each step)
-# up to a total of SCAN_MAX_DEG before giving up and stopping for good.
-# SCAN_MAX_DEG is deliberately small: the car must stay next to the curb
-# it's following, so the scan may only nudge it around a small obstacle,
-# never turn far enough to point it out into the middle of the road.
-# SCAN_ANGULAR_RATE_RAD_S is deliberately well under UGV02SerialAdapter's
-# MAX_STEER_Z (1.40 rad/s) -- this pivot has no forward speed to help
-# stabilize it, so a slower, more controllable rate is used.
-SCAN_STEP_DEG = 10
-SCAN_MAX_DEG = 30
-SCAN_ANGULAR_RATE_RAD_S = 0.7
-SCAN_STEP_DURATION_S = math.radians(SCAN_STEP_DEG) / SCAN_ANGULAR_RATE_RAD_S
-
 telemetry_data = {
     'pos_x': 0.0,
     'pos_y': 0.0,
@@ -218,18 +204,6 @@ class UGV02SerialAdapter:
 
         cmd_json = f'{{"T":13,"X":{linear_x:.3f},"Z":{angular_z:.3f}}}'
         send_serial(cmd_json)
-
-    def pivot(self, angular_z: float) -> None:
-        """Rotate in place at `angular_z` rad/s, holding linear velocity at
-        zero. Used only by the auto-mode obstacle-avoidance scan -- normal
-        driving never needs a stationary pivot, which is why
-        `send_command()` above deliberately zeroes Z whenever X is zero.
-        """
-        global target_x, target_z
-        with motion_lock:
-            target_x = 0.0
-            target_z = angular_z
-        send_serial(f'{{"T":13,"X":0.000,"Z":{angular_z:.3f}}}')
 
     def close(self) -> None:
         self._is_open = False
@@ -738,76 +712,6 @@ def start_auto_pipeline():
                 slow_distance_cm=slow_distance_cm,
             )
 
-            # Positive angular_z is a left turn, negative is right (matches
-            # UGV02SerialAdapter.send_command's steer convention: negative
-            # steer/left -> positive Z).
-            _TURN_LEFT = SCAN_ANGULAR_RATE_RAD_S
-            _TURN_RIGHT = -SCAN_ANGULAR_RATE_RAD_S
-
-            def _scan_for_clear_path(blocked_result):
-                """Pivot in SCAN_STEP_DEG increments, re-checking for a
-                clear path after each, up to SCAN_MAX_DEG total. Returns
-                the process_frame() result that found a clear path, or
-                None if still blocked after the full scan (caller should
-                treat that as a confirmed, final STOP).
-
-                Direction: turn away from a tracked curb (curb behind/
-                beside the car is the one obstacle we know isn't drivable
-                regardless of what the scan sees). If no curb is tracked,
-                there's nothing to derive a direction from, so start left;
-                if the very first step makes the obstacle reading worse
-                (closer than it was before turning), that guess was wrong
-                -- switch to right for the remaining steps.
-                """
-                curb_side = blocked_result.get("curb_side")
-                if curb_side == "left":
-                    direction = _TURN_RIGHT
-                elif curb_side == "right":
-                    direction = _TURN_LEFT
-                else:
-                    direction = _TURN_LEFT
-
-                pre_scan_distance_cm = blocked_result.get("obstacle_distance_cm")
-                direction_confirmed = curb_side in ("left", "right")
-
-                degrees_turned = 0
-                while degrees_turned < SCAN_MAX_DEG and not auto_stop_event.is_set():
-                    try:
-                        adapter.pivot(direction)
-                        time.sleep(SCAN_STEP_DURATION_S)
-                    finally:
-                        adapter.pivot(0.0)
-                    degrees_turned += SCAN_STEP_DEG
-
-                    frame = source.read()
-                    if frame is None:
-                        continue
-                    watchdog.on_frame_received()
-                    recheck = process_frame(frame, state)
-                    _state_cb({
-                        'nearest_distance_cm': recheck.get('obstacle_distance_cm'),
-                        'curb_offset_cm': recheck.get('current_offset_cm'),
-                        'curb_side': recheck.get('curb_side'),
-                        'speed_tier': recheck.get('speed'),
-                        'steer': recheck.get('steer'),
-                    })
-                    if recheck["speed"] != SpeedTier.STOP:
-                        return recheck
-
-                    if not direction_confirmed:
-                        # First step of an undirected (no-curb) scan: check
-                        # whether guessing left made things worse.
-                        new_distance_cm = recheck.get("obstacle_distance_cm")
-                        if (
-                            pre_scan_distance_cm is not None
-                            and new_distance_cm is not None
-                            and new_distance_cm < pre_scan_distance_cm
-                        ):
-                            direction = _TURN_RIGHT
-                        direction_confirmed = True
-
-                return None
-
             frame_count = 0
             while not auto_stop_event.is_set():
                 frame = source.read()
@@ -819,17 +723,16 @@ def start_auto_pipeline():
                 result = process_frame(frame, state)
 
                 if result["speed"] == SpeedTier.STOP:
-                    # Hold fully stopped before pivoting -- don't start a
-                    # scan turn while still carrying forward momentum.
+                    # A blocked path is a final stop: the car must stay next
+                    # to the curb it's following, never pivot/maneuver away
+                    # from it to route around something. A prior scan-and-
+                    # drive-away behavior here caused exactly that -- it
+                    # both drove the car into a curb corner it was supposed
+                    # to be stopping short of, and, once stopped, abandoned
+                    # curb-following by turning into open space and driving
+                    # straight out. Just hold stopped; the operator (or the
+                    # obstacle clearing on its own) is what un-blocks it.
                     watchdog.write_command(SpeedTier.STOP, 0)
-                    cleared = _scan_for_clear_path(result)
-                    if cleared is not None:
-                        # Path is clear at the new heading: drive straight
-                        # out of the turn rather than continuing to steer,
-                        # which would just carve a circle.
-                        watchdog.write_command(cleared["speed"], 0)
-                    else:
-                        watchdog.write_command(SpeedTier.STOP, 0)
                     continue
 
                 watchdog.write_command(result["speed"], result["steer"])
