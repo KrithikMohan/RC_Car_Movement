@@ -176,6 +176,42 @@ def test_run_pipeline_no_curb_falls_back_to_straight_steer_without_forcing_stop(
         assert result["speed"] == SpeedTier.FULL
 
 
+def test_run_pipeline_no_curb_uses_centered_band_not_full_frame_corridor(tmp_path, monkeypatch):
+    """Regression test: with no curb tracked (the normal indoor case),
+    the obstacle corridor must stay a centered band, not widen to the
+    full frame width. A full-frame corridor treats anything visible at
+    the frame's edges (walls, furniture outside the car's actual path)
+    as a blocking obstacle, which pins speed at STOP indoors and the car
+    never moves."""
+    import rccar.main as main_module
+    from rccar.capture.file import VideoFileSource
+
+    real_define_corridor = main_module.define_corridor
+    seen_fracs = []
+
+    def _spy_define_corridor(frame_shape, curb_side, curb_x=None, fallback_band_frac=0.6):
+        seen_fracs.append(fallback_band_frac)
+        return real_define_corridor(frame_shape, curb_side, curb_x=curb_x, fallback_band_frac=fallback_band_frac)
+
+    monkeypatch.setattr(main_module, "define_corridor", _spy_define_corridor)
+
+    num_frames = 6
+    video_path = str(tmp_path / "flat.mp4")
+    _make_flat_video(video_path, num_frames)
+
+    homography = load_homography(_REPO_ROOT_HOMOGRAPHY)
+    source = VideoFileSource(video_path)
+    fake_serial, watchdog = _build_watchdog_and_state(homography)
+
+    try:
+        run_pipeline(source, fake_serial, homography, watchdog, max_frames=num_frames)
+    finally:
+        source.release()
+
+    assert len(seen_fracs) == num_frames
+    assert all(frac == 0.6 for frac in seen_fracs)
+
+
 def test_process_frame_is_deterministic_given_identical_state_inputs():
     """process_frame must behave identically for identical (frame, state)
     inputs, independent of any hidden global state -- the property T28's

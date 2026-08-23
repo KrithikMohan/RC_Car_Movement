@@ -224,14 +224,12 @@ def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
 
     curb_x, current_offset_cm = estimate_curb_offset_cm(frame, curb_side, state.homography)
 
-    # No curb reference (indoor/off-road testing: curb_side is always None
-    # here) -- widen the fallback corridor to the full frame width instead
-    # of a centered 60% band, so obstacles off to either side of the frame
-    # are still checked. See define_corridor's docstring for why 60% is the
-    # right default when a curb *is* tracked (staying off a known curb
-    # line); with no curb at all, narrowing the checked area at all is an
-    # unjustified blind spot.
-    fallback_band_frac = 1.0 if curb_side in (None, "none") else 0.6
+    # No curb reference: use the same centered band as the tracked-curb
+    # case. A full-frame-width corridor here falsely treats anything
+    # visible at the frame's edges (walls, furniture well outside the car's
+    # actual path) as a blocking obstacle, which pins speed at STOP
+    # indoors, where curb_side is always None -- the car never moves.
+    fallback_band_frac = 0.6
     corridor_mask = define_corridor(
         frame.shape, curb_side, curb_x=curb_x, fallback_band_frac=fallback_band_frac
     )
