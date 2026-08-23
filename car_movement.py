@@ -5,7 +5,8 @@ import cv2
 import pygame
 import requests
 
-PI_IP = '10.42.0.1'  # Update to active Raspberry Pi IP
+#PI_IP = '10.42.0.1'  # Update to active Raspberry Pi IP
+PI_IP = '10.255.254.35'  # Update to active Raspberry Pi IP
 BASE_URL = f'http://{PI_IP}:5000'
 DOWNLOAD_DIR = os.path.expanduser('~/Downloads')
 

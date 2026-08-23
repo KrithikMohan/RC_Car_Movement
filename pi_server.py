@@ -22,7 +22,11 @@ try:
     from rccar.serial_client.protocol import decode_command
     from rccar.watchdog.watchdog import Watchdog
     from rccar.viz.overlay import draw_overlay
-    from rccar.main import run_pipeline
+    from rccar.main import PipelineState, process_frame
+    from rccar.segmentation.classify import AdaptiveClassifier
+    from rccar.curb.confidence import CurbConfidenceTracker
+    from rccar.decision.smoothing import MajorityVoteSmoother
+    from rccar.decision.speed import load_thresholds
     RCCAR_AVAILABLE = True
     print("[RCCAR SUCCESS] rccar autonomous driving pipeline loaded.")
 except ImportError as e:
@@ -314,8 +318,10 @@ def process_serial_line(line):
                     pass
 
         if raw_v is not None:
-            # Normalize units: millivolts (>1000), centivolts (>50), or volts (12.45)
-            if raw_v > 1000:
+            # Normalize units: millivolts (e.g. 12600), centivolts (e.g. 1260), or volts (12.60).
+            # A 3S pack's real voltage is 7-15V, so centivolt readings land in 700-1500 -
+            # well above 1000 - and must not be mistaken for millivolts (7000-15000).
+            if raw_v > 1500:
                 v = raw_v / 1000.0
             elif raw_v > 50:
                 v = raw_v / 100.0
@@ -611,17 +617,48 @@ def start_auto_pipeline():
                     telemetry_data['curb_side'] = meta.get('curb_side')
                     telemetry_data['curb_offset_cm'] = round(meta['curb_offset_cm'], 1) if meta.get('curb_offset_cm') is not None else None
 
-            run_pipeline(
-                source=source,
-                serial_client=adapter,
+            # rccar.main.run_pipeline() has no state_callback/stop_event hooks
+            # (it just runs until the source is exhausted and returns a batch
+            # list), so drive process_frame() directly to get per-frame
+            # telemetry and a way to stop a live camera source on demand.
+            stop_distance_cm, slow_distance_cm = load_thresholds()
+            state = PipelineState(
+                classifier=AdaptiveClassifier(),
+                curb_tracker=CurbConfidenceTracker(),
                 homography=homography,
-                watchdog=watchdog,
-                state_callback=_state_cb,
-                stop_event=auto_stop_event
+                speed_smoother=MajorityVoteSmoother(),
+                steer_smoother=MajorityVoteSmoother(),
+                stop_distance_cm=stop_distance_cm,
+                slow_distance_cm=slow_distance_cm,
             )
 
+            frame_count = 0
+            while not auto_stop_event.is_set():
+                frame = source.read()
+                if frame is None:
+                    time.sleep(0.01)
+                    continue
+
+                watchdog.on_frame_received()
+                result = process_frame(frame, state)
+                watchdog.write_command(result["speed"], result["steer"])
+
+                _state_cb({
+                    'nearest_distance_cm': result.get('obstacle_distance_cm'),
+                    'curb_offset_cm': result.get('current_offset_cm'),
+                    'curb_side': result.get('curb_side'),
+                    'speed_tier': result.get('speed'),
+                    'steer': result.get('steer'),
+                })
+
+                frame_count += 1
+                if frame_count % 10 == 0:
+                    watchdog.check_frame_staleness()
+
         except Exception as e:
+            import traceback
             print(f"[AUTO PIPELINE ERROR] {e}")
+            traceback.print_exc()
         finally:
             if source is not None:
                 try:
