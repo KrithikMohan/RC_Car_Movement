@@ -1,0 +1,31 @@
+# PLACEHOLDER reference file for scripts/check_calibration.py (T14).
+#
+# *** THIS FILE MUST BE REPLACED WITH REAL PHYSICAL MEASUREMENTS ***
+# The entry below is NOT a real measurement -- it is a placeholder so
+# the check_calibration.py tool has something to load and its output
+# format can be demonstrated. Any PASS/FAIL result produced from this
+# file is meaningless and must not be treated as a real calibration
+# validation.
+#
+# To create a real reference file:
+#   1. Place a physical marker (e.g. a tape-measure mark, a piece of
+#      tape) on the ground at a known distance from the camera.
+#   2. Capture a frame from the car's camera and find the marker's
+#      pixel coordinates in that frame (e.g. by opening the image in
+#      a viewer).
+#   3. Record the marker's real-world distance from the camera origin
+#      (measured with a tape measure), in cm.
+#   4. Replace the placeholder entry below (or add more entries) with
+#      this real image_point / known_distance_cm / label data.
+#
+# Format: a top-level `reference_points` list. Each entry:
+#   image_point:      [px, py] pixel coordinates of the marker in the
+#                      test frame.
+#   known_distance_cm: physically-measured ground-truth distance (cm)
+#                      from the camera/origin to the marker.
+#   label:             human-readable description of the marker.
+
+reference_points:
+  - image_point: [253, 217]
+    known_distance_cm: 46
+    label: "MEASURED value"

@@ -2,6 +2,7 @@ import os
 import time
 import math
 import shutil
+import subprocess
 import threading
 import json
 try:
@@ -491,37 +492,83 @@ class CameraGrabber:
     Dedicated single-owner frame grabber thread.
     Reads frames from physical camera device into a synchronized memory buffer,
     allowing simultaneous non-blocking access by Flask streaming and rccar CV.
+
+    Captures via an `ffmpeg` v4l2 subprocess (rawvideo/bgr24) rather than
+    cv2.VideoCapture: the opencv-python wheel available on this platform
+    (armv7l, no prebuilt V4L2/GStreamer backend) cannot open the USB camera
+    at all -- VideoCapture.isOpened() always returns False, silently
+    falling back to a blank frame forever. ffmpeg's own v4l2 demuxer (built
+    with --enable-libudev/v4l2 support) reads the device fine, so we shell
+    out to it instead and only use cv2 for downstream image processing.
     """
-    def __init__(self, device_indices=(0, 1, 2)):
-        self.cap = None
+    FRAME_WIDTH = 640
+    FRAME_HEIGHT = 480
+
+    def __init__(self, device_paths=('/dev/video0', '/dev/video1', '/dev/video2')):
+        self.proc = None
         self.lock = threading.Lock()
         self.latest_frame = None
         self.stopped = False
+        self._frame_size = self.FRAME_WIDTH * self.FRAME_HEIGHT * 3
 
-        for idx in device_indices:
-            cap = cv2.VideoCapture(idx)
-            if cap.isOpened():
-                ret, f = cap.read()
-                if ret and f is not None:
-                    self.cap = cap
-                    self.latest_frame = f
-                    print(f"[CAMERA SUCCESS] Connected to /dev/video{idx}")
+        for path in device_paths:
+            if not os.path.exists(path):
+                continue
+            # A device just released by a previous (e.g. crashed, or just
+            # restarted) instance can stay EBUSY for several seconds while
+            # the kernel/USB webcam finishes tearing down the prior
+            # session -- retry for up to ~15s before giving up on an
+            # otherwise-valid device path.
+            for attempt in range(15):
+                proc = self._spawn_ffmpeg(path)
+                first_frame = self._read_frame(proc.stdout)
+                if first_frame is not None:
+                    self.proc = proc
+                    self.latest_frame = first_frame
+                    print(f"[CAMERA SUCCESS] Connected to {path} via ffmpeg")
                     break
-                cap.release()
+                proc.kill()
+                proc.wait()
+                time.sleep(1.0)
+            if self.proc is not None:
+                break
 
-        if self.cap is None:
+        if self.proc is None:
             print("[CAMERA WARNING] No physical camera opened. Using test pattern generator.")
-            # Blank 640x480 test pattern for simulation
-            self.latest_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            # Blank frame for simulation
+            self.latest_frame = np.zeros((self.FRAME_HEIGHT, self.FRAME_WIDTH, 3), dtype=np.uint8)
 
         self.thread = threading.Thread(target=self._update_loop, daemon=True)
         self.thread.start()
 
+    def _spawn_ffmpeg(self, device_path):
+        return subprocess.Popen(
+            [
+                'ffmpeg',
+                '-f', 'v4l2',
+                '-input_format', 'mjpeg',
+                '-video_size', f'{self.FRAME_WIDTH}x{self.FRAME_HEIGHT}',
+                '-i', device_path,
+                '-f', 'rawvideo',
+                '-pix_fmt', 'bgr24',
+                '-',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=self._frame_size,
+        )
+
+    def _read_frame(self, stdout):
+        data = stdout.read(self._frame_size)
+        if data is None or len(data) != self._frame_size:
+            return None
+        return np.frombuffer(data, dtype=np.uint8).reshape(self.FRAME_HEIGHT, self.FRAME_WIDTH, 3)
+
     def _update_loop(self):
         while not self.stopped:
-            if self.cap and self.cap.isOpened():
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
+            if self.proc is not None:
+                frame = self._read_frame(self.proc.stdout)
+                if frame is not None:
                     with self.lock:
                         self.latest_frame = frame
                 else:
@@ -533,12 +580,21 @@ class CameraGrabber:
         with self.lock:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
-        return np.zeros((480, 640, 3), dtype=np.uint8)
+        return np.zeros((self.FRAME_HEIGHT, self.FRAME_WIDTH, 3), dtype=np.uint8)
+
+    def has_camera(self) -> bool:
+        """True if reading from a real device; False if on the blank fallback.
+
+        Obstacle detection is blind on the blank fallback frame -- callers
+        (auto/obstacle-avoidance mode) must not drive on that signal.
+        """
+        return self.proc is not None
 
     def stop(self):
         self.stopped = True
-        if self.cap:
-            self.cap.release()
+        if self.proc is not None:
+            self.proc.kill()
+            self.proc.wait()
 
 
 camera_grabber = CameraGrabber()
@@ -576,6 +632,11 @@ def start_auto_pipeline():
     global auto_thread, auto_running, drive_mode, auto_stop_event, telemetry_data
     if not RCCAR_AVAILABLE:
         print("[AUTO WARNING] rccar module not found on system. Auto mode cannot be started.")
+        return False
+
+    if not camera_grabber.has_camera():
+        print("[AUTO WARNING] No live camera feed (blank test-pattern frame). "
+              "Refusing to start auto mode: obstacle detection would be blind.")
         return False
 
     if auto_running:
@@ -616,12 +677,31 @@ def start_auto_pipeline():
                     telemetry_data['nearest_obs_cm'] = round(meta['nearest_distance_cm'], 1) if meta.get('nearest_distance_cm') is not None else None
                     telemetry_data['curb_side'] = meta.get('curb_side')
                     telemetry_data['curb_offset_cm'] = round(meta['curb_offset_cm'], 1) if meta.get('curb_offset_cm') is not None else None
+                    speed_tier = meta.get('speed_tier')
+                    telemetry_data['obstacle_speed_tier'] = speed_tier.name if speed_tier is not None else None
+                    telemetry_data['obstacle_steer'] = meta.get('steer')
 
             # rccar.main.run_pipeline() has no state_callback/stop_event hooks
             # (it just runs until the source is exhausted and returns a batch
             # list), so drive process_frame() directly to get per-frame
             # telemetry and a way to stop a live camera source on demand.
-            stop_distance_cm, slow_distance_cm = load_thresholds()
+            #
+            # load_thresholds() with no path defaults to a config/thresholds.yaml
+            # resolved relative to the *rccar package's own* checkout, not this
+            # repo -- silently ignoring our config/thresholds.yaml. Resolve our
+            # own path explicitly here (mirrors the homography_path lookup
+            # above) so the tuned values actually take effect.
+            thresholds_path = "config/thresholds.yaml"
+            thresholds_alt_paths = [
+                "/home/pi/config/thresholds.yaml",
+                os.path.join(os.path.dirname(__file__), "config", "thresholds.yaml"),
+                "thresholds.yaml"
+            ]
+            for p in thresholds_alt_paths:
+                if os.path.exists(p):
+                    thresholds_path = p
+                    break
+            stop_distance_cm, slow_distance_cm = load_thresholds(thresholds_path)
             state = PipelineState(
                 classifier=AdaptiveClassifier(),
                 curb_tracker=CurbConfidenceTracker(),

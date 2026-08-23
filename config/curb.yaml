@@ -1,3 +1,10 @@
-window_size: 5
-min_confidence: 0.5
-horizontal_angle_threshold_deg: 20.0
+# Config for rccar.curb.confidence.CurbConfidenceTracker.
+#
+# Previously this file used the wrong key names (window_size,
+# min_confidence, horizontal_angle_threshold_deg) which _load_defaults()
+# silently ignored (unknown keys -> fell back to hardcoded defaults). These
+# are the corrected key names, set to the values that were actually in
+# effect at runtime (the hardcoded fallback), so fixing the schema doesn't
+# also silently change behavior.
+confidence_window_n: 5
+min_confidence_threshold: 0.2

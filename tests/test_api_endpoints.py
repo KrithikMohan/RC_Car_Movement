@@ -1,6 +1,6 @@
 import json
 import pytest
-from pi_server import app, drive_mode, stop_auto_pipeline
+from pi_server import app, camera_grabber, drive_mode, stop_auto_pipeline
 
 
 @pytest.fixture
@@ -33,7 +33,12 @@ def test_speed_endpoint(client):
     assert data['speed_mode'] == 'low'
 
 
-def test_mode_and_manual_override(client):
+def test_mode_and_manual_override(client, monkeypatch):
+    # Auto mode requires a live camera feed (see start_auto_pipeline's
+    # has_camera() guard); this test is about mode-switching/override
+    # behavior, not hardware availability, so fake a live camera.
+    monkeypatch.setattr(camera_grabber, "has_camera", lambda: True)
+
     # Enable Auto Mode
     res = client.post('/mode', json={'mode': 'auto'})
     assert res.status_code == 200
