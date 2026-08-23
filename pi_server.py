@@ -21,7 +21,7 @@ try:
     from rccar.capture.file import VideoFileSource
     from rccar.serial_client.protocol import decode_command
     from rccar.watchdog.watchdog import Watchdog
-    from rccar.viz.overlay import render_overlay
+    from rccar.viz.overlay import draw_overlay
     from rccar.main import run_pipeline
     RCCAR_AVAILABLE = True
     print("[RCCAR SUCCESS] rccar autonomous driving pipeline loaded.")
@@ -693,17 +693,13 @@ def gen_frames():
             if meta.get('road_mask') is not None:
                 scaled_mask = cv2.resize(meta['road_mask'], (w_f, h_f), interpolation=cv2.INTER_NEAREST)
 
-            frame = render_overlay(
-                frame=frame,
-                road_mask=scaled_mask,
-                curb_line=scaled_curb,
-                curb_side=meta.get('curb_side'),
-                curb_offset_cm=meta.get('curb_offset_cm'),
-                obstacles=scaled_obs,
-                nearest_distance_cm=meta.get('nearest_distance_cm'),
-                speed_tier=meta.get('speed_tier'),
-                steer=meta.get('steer'),
-                fps=meta.get('fps')
+            frame = draw_overlay(
+                frame,
+                scaled_mask,
+                scaled_curb,
+                meta.get('speed_tier'),
+                meta.get('steer'),
+                meta.get('curb_side') or 'unknown',
             )
 
         with writer_lock:
