@@ -20,7 +20,7 @@ try:
     from rccar.capture.source import FrameSource
     from rccar.capture.live import LiveCameraSource
     from rccar.capture.file import VideoFileSource
-    from rccar.serial_client.protocol import decode_command
+    from rccar.serial_client.protocol import decode_command, SpeedTier
     from rccar.watchdog.watchdog import Watchdog
     from rccar.viz.overlay import draw_overlay
     from rccar.main import PipelineState, process_frame
@@ -137,6 +137,17 @@ DECEL_X = 3.2   # m/s^2 linear braking ramp
 ACCEL_Z = 3.8   # rad/s^2 angular acceleration ramp (soft entry into turns)
 DECEL_Z = 4.8   # rad/s^2 angular deceleration ramp (clean exit from turns)
 
+# Auto-mode obstacle-avoidance scan: when blocked, pivot in place by
+# SCAN_STEP_DEG at a time (re-checking for a clear path after each step)
+# up to a total of SCAN_MAX_DEG before giving up and stopping for good.
+# SCAN_ANGULAR_RATE_RAD_S is deliberately well under UGV02SerialAdapter's
+# MAX_STEER_Z (1.40 rad/s) -- this pivot has no forward speed to help
+# stabilize it, so a slower, more controllable rate is used.
+SCAN_STEP_DEG = 10
+SCAN_MAX_DEG = 90
+SCAN_ANGULAR_RATE_RAD_S = 0.7
+SCAN_STEP_DURATION_S = math.radians(SCAN_STEP_DEG) / SCAN_ANGULAR_RATE_RAD_S
+
 telemetry_data = {
     'pos_x': 0.0,
     'pos_y': 0.0,
@@ -204,6 +215,18 @@ class UGV02SerialAdapter:
 
         cmd_json = f'{{"T":13,"X":{linear_x:.3f},"Z":{angular_z:.3f}}}'
         send_serial(cmd_json)
+
+    def pivot(self, angular_z: float) -> None:
+        """Rotate in place at `angular_z` rad/s, holding linear velocity at
+        zero. Used only by the auto-mode obstacle-avoidance scan -- normal
+        driving never needs a stationary pivot, which is why
+        `send_command()` above deliberately zeroes Z whenever X is zero.
+        """
+        global target_x, target_z
+        with motion_lock:
+            target_x = 0.0
+            target_z = angular_z
+        send_serial(f'{{"T":13,"X":0.000,"Z":{angular_z:.3f}}}')
 
     def close(self) -> None:
         self._is_open = False
@@ -712,6 +735,42 @@ def start_auto_pipeline():
                 slow_distance_cm=slow_distance_cm,
             )
 
+            def _scan_for_clear_path():
+                """Pivot in SCAN_STEP_DEG increments, re-checking for a
+                clear path after each, up to SCAN_MAX_DEG total. Returns
+                the process_frame() result that found a clear path, or
+                None if still blocked after the full scan (caller should
+                treat that as a confirmed, final STOP).
+
+                Turns a single direction (right) each call; this is an
+                arbitrary but consistent default, not derived from which
+                side actually has more room.
+                """
+                degrees_turned = 0
+                while degrees_turned < SCAN_MAX_DEG and not auto_stop_event.is_set():
+                    try:
+                        adapter.pivot(-SCAN_ANGULAR_RATE_RAD_S)
+                        time.sleep(SCAN_STEP_DURATION_S)
+                    finally:
+                        adapter.pivot(0.0)
+                    degrees_turned += SCAN_STEP_DEG
+
+                    frame = source.read()
+                    if frame is None:
+                        continue
+                    watchdog.on_frame_received()
+                    recheck = process_frame(frame, state)
+                    _state_cb({
+                        'nearest_distance_cm': recheck.get('obstacle_distance_cm'),
+                        'curb_offset_cm': recheck.get('current_offset_cm'),
+                        'curb_side': recheck.get('curb_side'),
+                        'speed_tier': recheck.get('speed'),
+                        'steer': recheck.get('steer'),
+                    })
+                    if recheck["speed"] != SpeedTier.STOP:
+                        return recheck
+                return None
+
             frame_count = 0
             while not auto_stop_event.is_set():
                 frame = source.read()
@@ -721,6 +780,21 @@ def start_auto_pipeline():
 
                 watchdog.on_frame_received()
                 result = process_frame(frame, state)
+
+                if result["speed"] == SpeedTier.STOP:
+                    # Hold fully stopped before pivoting -- don't start a
+                    # scan turn while still carrying forward momentum.
+                    watchdog.write_command(SpeedTier.STOP, 0)
+                    cleared = _scan_for_clear_path()
+                    if cleared is not None:
+                        # Path is clear at the new heading: drive straight
+                        # out of the turn rather than continuing to steer,
+                        # which would just carve a circle.
+                        watchdog.write_command(cleared["speed"], 0)
+                    else:
+                        watchdog.write_command(SpeedTier.STOP, 0)
+                    continue
+
                 watchdog.write_command(result["speed"], result["steer"])
 
                 _state_cb({

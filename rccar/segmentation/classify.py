@@ -47,11 +47,22 @@ from rccar.segmentation.model import RoadColorModel
 
 DEFAULT_THRESHOLD = 0.05
 
+# A specular highlight (glare/reflection off a glossy floor) blows out to
+# near-white -- very high Value, very low Saturation -- regardless of the
+# surface's actual color, so the H/S histogram lookup below has no reliable
+# signal for it and frequently misclassifies it as non-road. Since we can't
+# attribute a real color to these pixels, treat them as road (i.e. "not an
+# obstacle") rather than let the histogram guess.
+GLARE_MIN_VALUE = 180
+GLARE_MAX_SATURATION = 50
+
 
 def classify_frame(
     frame: np.ndarray,
     model: RoadColorModel,
     threshold: float = DEFAULT_THRESHOLD,
+    glare_min_value: int = GLARE_MIN_VALUE,
+    glare_max_saturation: int = GLARE_MAX_SATURATION,
 ) -> np.ndarray:
     """Classify every pixel of ``frame`` as road (255) or non-road (0).
 
@@ -66,6 +77,11 @@ def classify_frame(
         Minimum road-likelihood score, normalized to the histogram's peak
         bin (i.e. in ``[0, 1]``), for a pixel to be classified as road. See
         module docstring for the reasoning behind the default.
+    glare_min_value, glare_max_saturation:
+        A pixel with Value >= ``glare_min_value`` and Saturation <=
+        ``glare_max_saturation`` is treated as a specular highlight and
+        forced to road (255), overriding the histogram lookup. See module
+        docstring above for why.
 
     Returns
     -------
@@ -89,6 +105,7 @@ def classify_frame(
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     h = hsv[:, :, 0].astype(np.float64)
     s = hsv[:, :, 1].astype(np.float64)
+    v = hsv[:, :, 2]
 
     h_lo, h_hi = model.h_range
     s_lo, s_hi = model.s_range
@@ -102,6 +119,8 @@ def classify_frame(
     normalized = likelihood / peak
 
     mask = np.where(normalized > threshold, np.uint8(255), np.uint8(0))
+    glare = (v >= glare_min_value) & (s <= glare_max_saturation)
+    mask[glare] = 255
     return mask
 
 

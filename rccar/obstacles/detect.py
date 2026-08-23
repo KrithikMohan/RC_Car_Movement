@@ -123,7 +123,7 @@ def detect_obstacles(
     frame: np.ndarray,
     road_mask: np.ndarray,
     corridor_mask: np.ndarray,
-    min_blob_area: int = 50,
+    min_blob_area: int = 200,
 ) -> List[Obstacle]:
     """Find non-road blobs inside the drivable corridor.
 
@@ -143,7 +143,13 @@ def detect_obstacles(
     min_blob_area:
         Minimum connected-component pixel area for a blob to be reported
         as an obstacle; smaller blobs are treated as classifier noise and
-        discarded.
+        discarded. Raised from an earlier default of 50: on a glossy
+        indoor floor, the dimmer halo around a specular highlight survives
+        classify_frame's glare guard (which only forces the brightest,
+        most desaturated core pixels to road) as a small non-road blob --
+        this filters out what's left of those without needing an even
+        more aggressive glare threshold, which would risk misclassifying
+        real light-colored obstacles as road instead.
 
     Returns
     -------

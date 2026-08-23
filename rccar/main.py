@@ -198,6 +198,10 @@ class PipelineState:
     # frames can be smaller).
     horizon_y_frac: Optional[float] = None
     max_obstacle_range_cm: Optional[float] = 60.96  # 2 ft; farther objects are ignored entirely
+    # A raw STOP must repeat this many consecutive frames before it's
+    # trusted (see the STOP-confirmation comment in process_frame below).
+    stop_confirm_frames: int = 3
+    consecutive_raw_stop_frames: int = 0
 
 
 def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
@@ -279,9 +283,22 @@ def process_frame(frame: np.ndarray, state: PipelineState) -> dict:
     # jitter but can let the car coast into something it already detected.
     # Feed every raw tier into the smoother (so it keeps tracking recent
     # history for SLOW/FULL decisions), but let a raw STOP win immediately
-    # regardless of what the smoothed vote says.
+    # once confirmed, regardless of what the smoothed vote says.
+    #
+    # "Confirmed" requires stop_confirm_frames consecutive raw STOPs, not
+    # just one: a single-frame glare/reflection misclassification (bright,
+    # briefly non-road-colored, gone again next frame) would otherwise
+    # trip an immediate, unrecoverable STOP the same way a real obstacle
+    # does. A real obstacle stays put across several frames; a lighting
+    # artifact usually doesn't. This still reacts within a fraction of a
+    # second (a few frames), just not on a single potentially-spurious one.
     smoothed_speed = state.speed_smoother.update(raw_speed)
-    speed = SpeedTier.STOP if raw_speed == SpeedTier.STOP else smoothed_speed
+    if raw_speed == SpeedTier.STOP:
+        state.consecutive_raw_stop_frames += 1
+    else:
+        state.consecutive_raw_stop_frames = 0
+    stop_confirmed = state.consecutive_raw_stop_frames >= state.stop_confirm_frames
+    speed = SpeedTier.STOP if stop_confirmed else smoothed_speed
 
     raw_steer = compute_steer(curb_side, current_offset_cm)
     if state.steer_smoother is not None:
